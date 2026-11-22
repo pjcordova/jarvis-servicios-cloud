@@ -1,0 +1,124 @@
+# El panel de Jarvis como servicio en Kubernetes (k3s en la VM de Google Cloud). Es la misma imagen que corre en
+# Cloud Run (panel/Dockerfile): la misma base de producción, sin secretos y sin la sección Administración.
+# Vercel sigue siendo la dirección principal. Aquí se muestra la orquestación:
+# - Deployment: al menos 1 copia sana; si una muere, Kubernetes la reemplaza (autocuración).
+# - Chequeos de salud: si una copia no responde, deja de recibir tráfico y se reinicia.
+# - Service: una sola dirección que reparte entre las copias (balanceo).
+# - HPA: si la CPU pasa del 60 %, sube hasta 3 copias; cuando baja, vuelve a 1 (elasticidad).
+# Aplicar: kubectl apply -f k8s/panel.yaml    Quitar: kubectl delete namespace jarvis
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: jarvis
+  labels:
+    app.kubernetes.io/part-of: jarvis
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: panel
+  namespace: jarvis
+  labels:
+    app: panel
+spec:
+  replicas: 1
+  revisionHistoryLimit: 3
+  selector:
+    matchLabels:
+      app: panel
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: 0 # al actualizar, la copia vieja sigue atendiendo hasta que la nueva esté sana
+      maxSurge: 1
+  template:
+    metadata:
+      labels:
+        app: panel
+    spec:
+      automountServiceAccountToken: false # el panel no habla con Kubernetes: sin credenciales del clúster
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000 # el usuario "node" de la imagen
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: panel
+          image: jarvis-panel:k8s # importada al clúster (no se baja de internet): ver scripts/desplegar-k8s.ps1
+          imagePullPolicy: Never
+          ports:
+            - name: http
+              containerPort: 8080
+          env:
+            - name: PORT
+              value: "8080"
+            - name: HOSTNAME
+              value: "0.0.0.0"
+          # Lo que pide para arrancar (requests) y su techo (limits). El HPA mide la CPU contra los requests.
+          resources:
+            requests:
+              cpu: 100m
+              memory: 128Mi
+            limits:
+              cpu: 400m # 3 copias x 0.4 + la carga 0.2 = 1.4 de las 2 CPU de la VM, solo mientras dura la prueba
+              memory: 384Mi
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: ["ALL"]
+          # Lista para recibir tráfico: responde la página liviana del manifiesto.
+          readinessProbe:
+            httpGet:
+              path: /manifest.webmanifest
+              port: http
+            initialDelaySeconds: 3
+            periodSeconds: 5
+            failureThreshold: 3
+          # Viva: si deja de responder por 30 s, Kubernetes la reinicia.
+          livenessProbe:
+            httpGet:
+              path: /manifest.webmanifest
+              port: http
+            initialDelaySeconds: 15
+            periodSeconds: 10
+            failureThreshold: 3
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: panel
+  namespace: jarvis
+spec:
+  type: NodePort # en la VM, Tailscale publica este puerto solo para los equipos del administrador
+  selector:
+    app: panel
+  ports:
+    - name: http
+      port: 80
+      targetPort: http
+      nodePort: 30800
+---
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: panel
+  namespace: jarvis
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: panel
+  minReplicas: 1
+  maxReplicas: 3 # techo: 3 copias x 384 MB caben en la VM junto a Docker
+  metrics:
+    - type: Resource
+      resource:
+        name: cpu
+        target:
+          type: Utilization
+          averageUtilization: 60
+  behavior:
+    scaleUp:
+      stabilizationWindowSeconds: 15 # sube rápido (se ve en clase)
+    scaleDown:
+      stabilizationWindowSeconds: 60 # baja al minuto sin carga (por defecto son 5)

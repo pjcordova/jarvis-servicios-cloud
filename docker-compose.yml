@@ -1,0 +1,154 @@
+# Jarvis en Docker (demo del proyecto final de Servicios Cloud).
+# Jarvis + Prometheus (métricas y reglas de alerta) + Alertmanager (avisos) + Grafana (tablero).
+#
+# Uso:
+#   1. Copia .env.demo.example como .env.demo y pon tu API key de Gemini.
+#   2. docker compose up -d
+#   3. Jarvis: http://127.0.0.1:3747 · Grafana: http://127.0.0.1:3030
+#      Prometheus: http://127.0.0.1:9090 · Alertmanager: http://127.0.0.1:9093
+# Todos los puertos se publican solo en 127.0.0.1: nada se expone a la red. Afuera se llega por Tailscale.
+name: jarvis-demo
+
+services:
+  jarvis:
+    # La imagen se construye con docker/Dockerfile.jarvis desde el repositorio de la aplicación, que es privado:
+    # aquí se publica la infraestructura (contenedores, orquestación y monitoreo), no el código del asistente.
+    #   docker build -f docker/Dockerfile.jarvis -t jarvis-app:demo <ruta-del-codigo>
+    image: jarvis-app:demo
+    container_name: jarvis-demo
+    init: true # un init mínimo como PID 1: reenvía las señales a Node y "docker compose down" lo cierra al toque
+    env_file:
+      - path: .env.demo
+        required: false # sin el archivo arranca igual y la interfaz avisa que falta la API key
+    environment:
+      JARVIS_DEMO: "si" # tráfico y caos para la clase (scripts/demo.js), solo por el puerto interno
+    ports:
+      - "127.0.0.1:3747:3747" # solo esta PC; no se expone a la red
+    expose:
+      - "9464" # métricas: solo la red interna (Prometheus); no se publica en la PC
+    volumes:
+      - boveda:/boveda # la bóveda de demostración (datos ficticios)
+      - datos:/datos # estado de Jarvis (briefing, aviso, cierre)
+    # Límites (cgroups): si pasa la memoria, el kernel mata el proceso y Docker lo reinicia.
+    mem_limit: 512m
+    memswap_limit: 512m # sin swap: el límite de memoria es real (si no, usaría swap del host)
+    cpus: 1.0
+    restart: unless-stopped
+
+  prometheus:
+    image: prom/prometheus:v3.13.5
+    container_name: jarvis-prometheus
+    command:
+      - --config.file=/etc/prometheus/prometheus.yml
+      - --storage.tsdb.path=/prometheus
+      - --storage.tsdb.retention.time=15d # base de series temporales: se guardan 15 días
+    volumes:
+      - ./monitoring/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - ./monitoring/alertas.yml:/etc/prometheus/alertas.yml:ro
+      - ./monitoring/clientes:/etc/prometheus/clientes:ro # el Jarvis de cada cliente (ver monitoring/clientes)
+      - prometheus:/prometheus
+    ports:
+      - "127.0.0.1:9090:9090"
+    mem_limit: 256m
+    restart: unless-stopped
+    depends_on:
+      - jarvis
+      - alertmanager
+      - metricas-servicio
+
+  alertmanager:
+    image: prom/alertmanager:v0.34.1
+    container_name: jarvis-alertmanager
+    command:
+      - --config.file=/etc/alertmanager/alertmanager.yml
+      - --storage.path=/alertmanager
+    volumes:
+      - ./monitoring/alertmanager.yml:/etc/alertmanager/alertmanager.yml:ro
+      - alertmanager:/alertmanager
+    ports:
+      - "127.0.0.1:9093:9093" # para ver las alertas en el navegador
+    mem_limit: 128m
+    restart: unless-stopped
+
+  # Jarvis como servicio (panel en Vercel + Neon): lee sus totales de Neon una vez por hora y los deja para Prometheus.
+  # La conexión (rol jarvis_metricas, solo totales) va en .env.servicio, fuera de git (ver servicio-metricas/preparar.mjs).
+  metricas-servicio:
+    build: ./servicio-metricas
+    image: jarvis-servicio-metricas:1
+    container_name: jarvis-servicio-metricas
+    init: true
+    env_file:
+      - path: .env.servicio
+        required: false # sin el archivo arranca igual y Prometheus ve jarvis_servicio_lectura_ok 0
+    expose:
+      - "9465" # solo la red interna (Prometheus); no se publica
+    volumes:
+      - estado-respaldo:/estado-respaldo:ro # el resultado del respaldo de cada noche (lo deja el servicio respaldo)
+    mem_limit: 128m
+    memswap_limit: 128m
+    cpus: 0.25
+    restart: unless-stopped
+
+  # Respaldo diario de la base de Neon (Jarvis como servicio) a Cloud Storage, cifrado. Ver servicio-respaldo/.
+  # Secretos fuera de git, en .env.respaldo: la conexión de jarvis_respaldo, la llave pública, el bucket y la cuenta de
+  # servicio que solo puede subir archivos a ese bucket (scripts/desplegar-respaldo.ps1 lo arma).
+  respaldo:
+    build: ./servicio-respaldo
+    image: jarvis-servicio-respaldo:1
+    container_name: jarvis-servicio-respaldo
+    init: true
+    env_file:
+      - path: .env.respaldo
+        required: false # sin el archivo, cada intento falla y Grafana lo muestra
+    volumes:
+      - estado-respaldo:/estado
+    mem_limit: 256m
+    memswap_limit: 256m
+    cpus: 0.5
+    restart: unless-stopped
+
+  grafana:
+    image: grafana/grafana:13.2.4
+    container_name: jarvis-grafana
+    env_file:
+      - path: .env.grafana
+        required: false # contraseña del admin; sin el archivo, Grafana pide cambiar admin/admin al entrar
+    environment:
+      GF_AUTH_ANONYMOUS_ENABLED: "true" # el tablero se ve sin iniciar sesión, solo lectura
+      GF_AUTH_ANONYMOUS_ORG_ROLE: Viewer
+      GF_DASHBOARDS_DEFAULT_HOME_DASHBOARD_PATH: /etc/grafana/dashboards/jarvis.json
+      # Sin enviar estadísticas ni buscar actualizaciones afuera.
+      GF_ANALYTICS_REPORTING_ENABLED: "false"
+      GF_ANALYTICS_CHECK_FOR_UPDATES: "false"
+      GF_ANALYTICS_CHECK_FOR_PLUGIN_UPDATES: "false"
+      GF_NEWS_NEWS_FEED_ENABLED: "false"
+      # Solo Prometheus: sin bajar plugins de grafana.com al arrancar y sin cargar las otras fuentes
+      # de datos (cada una levanta su propio proceso y Grafana se pasaba de memoria).
+      GF_PLUGINS_PREINSTALL_DISABLED: "true"
+      # Grafana es Go: con GOMEMLIMIT libera memoria antes de llegar al límite del contenedor.
+      GOMEMLIMIT: 500MiB
+      GF_PLUGINS_DISABLE_PLUGINS: >-
+        grafana-advisor-app,grafana-exploretraces-app,grafana-lokiexplore-app,grafana-metricsdrilldown-app,
+        grafana-pyroscope-app,grafana-pyroscope-datasource,elasticsearch,grafana-postgresql-datasource,influxdb,
+        jaeger,loki,mssql,mysql,opentsdb,stackdriver,tempo,zipkin,cloudwatch,azuremonitor,graphite
+    volumes:
+      - ./monitoring/grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./monitoring/grafana/dashboards:/etc/grafana/dashboards:ro
+      - grafana:/var/lib/grafana
+    ports:
+      - "127.0.0.1:3030:3000" # 3030 para no chocar con servidores de desarrollo en 3000
+    # 768 MB: en la VM de Google Cloud (sin swap) con 512 MB el kernel lo mató 8 veces (OOM). En la laptop
+    # no se notaba porque Docker Desktop le prestaba swap.
+    mem_limit: 768m
+    memswap_limit: 768m
+    restart: unless-stopped
+    depends_on:
+      - prometheus
+
+volumes:
+  boveda:
+  datos:
+  prometheus:
+  alertmanager:
+  grafana:
+  estado-respaldo:

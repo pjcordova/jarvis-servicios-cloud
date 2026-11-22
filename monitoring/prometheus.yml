@@ -1,0 +1,40 @@
+# Prometheus para Jarvis: lee /metrics de Jarvis cada 15 s (modelo pull) por la red interna de Docker,
+# evalúa las reglas de alerta y le pasa las disparadas a Alertmanager.
+global:
+  scrape_interval: 15s
+  evaluation_interval: 15s
+
+rule_files:
+  - /etc/prometheus/alertas.yml
+
+alerting:
+  alertmanagers:
+    - static_configs:
+        - targets: ["alertmanager:9093"]
+
+scrape_configs:
+  - job_name: jarvis
+    static_configs:
+      - targets: ["jarvis:9464"]
+        labels:
+          cliente: principal
+    # Un Jarvis por cliente (Jarvis como servicio): cada uno se agrega con un archivo en
+    # monitoreo/clientes/<cliente>.json, sin tocar este. Prometheus lo lee solo, sin reiniciar.
+    file_sd_configs:
+      - files: ["/etc/prometheus/clientes/*.json"]
+
+  # Jarvis como servicio (panel en Vercel + Neon): los totales cambian como mucho una vez por hora, así que
+  # basta leer cada minuto (el colector no le pregunta a Neon en cada lectura).
+  - job_name: servicio
+    scrape_interval: 60s
+    static_configs:
+      - targets: ["metricas-servicio:9465"]
+
+  # El monitoreo también necesita su propia salud: Prometheus y Alertmanager se miden a sí mismos.
+  - job_name: prometheus
+    static_configs:
+      - targets: ["localhost:9090"]
+
+  - job_name: alertmanager
+    static_configs:
+      - targets: ["alertmanager:9093"]

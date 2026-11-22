@@ -1,0 +1,10 @@
+# Tableros que Grafana carga al arrancar desde monitoreo/grafana/dashboards.
+apiVersion: 1
+providers:
+  - name: jarvis
+    folder: Jarvis
+    type: file
+    disableDeletion: true
+    allowUiUpdates: false
+    options:
+      path: /etc/grafana/dashboards

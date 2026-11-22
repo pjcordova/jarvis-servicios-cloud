@@ -1,0 +1,86 @@
+# Reglas de alerta de Jarvis: qué pasa, cuánto tiempo tiene que durar y qué hacer.
+# Prometheus las evalúa cada 15 s. Alertmanager las agrupa y avisa (ver alertmanager.yml).
+# Pruebas: monitoreo/alertas.test.yml (promtool test rules).
+groups:
+  - name: jarvis
+    rules:
+      - alert: JarvisCaido
+        expr: up{job="jarvis"} == 0
+        for: 1m
+        labels:
+          severity: critica
+        annotations:
+          resumen: Jarvis no responde hace más de 1 minuto.
+          accion: Docker lo reinicia solo. Si sigue caído, revisa "docker compose logs jarvis".
+
+      # Con un mínimo de tráfico: 1 error en 2 llamadas no es una tendencia.
+      - alert: ErroresDeModelo
+        expr: |
+          (
+            sum(rate(jarvis_modelo_solicitudes_total{resultado!="ok"}[5m]))
+            / sum(rate(jarvis_modelo_solicitudes_total[5m]))
+          ) > 0.05
+          and sum(increase(jarvis_modelo_solicitudes_total[5m])) >= 3
+        for: 2m
+        labels:
+          severity: advertencia
+        annotations:
+          resumen: "Fallan más del 5 % de las llamadas a Gemini ({{ $value | humanizePercentage }})."
+          accion: Revisa si Gemini está saturado (504). El respaldo debería estar respondiendo; si también falla, revisa la API key y la cuota.
+
+      - alert: JarvisLento
+        expr: histogram_quantile(0.95, sum by (le) (rate(jarvis_herramienta_duracion_segundos_bucket[5m]))) > 5
+        for: 5m
+        labels:
+          severity: advertencia
+        annotations:
+          resumen: "El 95 % de las herramientas tarda hasta {{ $value | humanizeDuration }} (objetivo: menos de 5 s)."
+          accion: Mira en Grafana qué herramienta se demora (panel Herramientas p95) y si Gemini o Google Calendar están lentos.
+
+      - alert: MemoriaAlta
+        expr: jarvis_process_resident_memory_bytes / jarvis_memoria_limite_bytes > 0.8
+        for: 5m
+        labels:
+          severity: advertencia
+        annotations:
+          resumen: "Jarvis usa el {{ $value | humanizePercentage }} de su límite de memoria."
+          accion: Si llega al 100 %, el kernel lo mata (OOM). Sube mem_limit (escalado vertical) o busca qué está consumiendo memoria.
+
+  # Jarvis como servicio (panel en Vercel + Neon): lo lee el colector de servicio-metricas una vez por hora.
+  - name: servicio
+    rules:
+      - alert: ServicioSinMetricas
+        expr: time() - max(jarvis_servicio_ultima_lectura_timestamp_segundos) > 3 * 3600
+        for: 10m
+        labels:
+          severity: advertencia
+        annotations:
+          resumen: Hace más de 3 horas que no llegan los totales de Jarvis como servicio.
+          accion: 'Revisa "docker compose logs metricas-servicio": falta .env.servicio, cambió la contraseña de jarvis_metricas o Neon no responde.'
+
+      - alert: PagosPorConfirmar
+        expr: sum(jarvis_servicio_pagos{estado="reportado"}) > 0
+        for: 1h
+        labels:
+          severity: advertencia
+        annotations:
+          resumen: "Hay {{ $value }} pago(s) reportado(s) esperando tu confirmación."
+          accion: Entra al panel, Más → Cobros, y confírmalos o recházalos. Jarvis nunca los confirma solo.
+
+      - alert: EncargosFallando
+        expr: sum(jarvis_servicio_encargos_24h{estado="fallido"}) >= 10
+        for: 1h
+        labels:
+          severity: advertencia
+        annotations:
+          resumen: "{{ $value }} encargos fallaron en las últimas 24 horas."
+          accion: Mira en Grafana qué agente falla (panel Encargos por estado) y revisa los logs de Vercel o el sistema conectado.
+
+      - alert: RespaldoAtrasado
+        expr: time() - max(jarvis_servicio_respaldo_ultimo_ok_timestamp_segundos) > 30 * 3600
+        for: 10m
+        labels:
+          severity: critica
+        annotations:
+          resumen: El último respaldo bueno de Neon tiene más de 30 horas.
+          accion: 'Revisa "docker compose logs respaldo" en la VM (contraseña de jarvis_respaldo, la cuenta de servicio o el bucket) y hazlo a mano con "docker compose exec respaldo /app/respaldar.sh".'

@@ -1,0 +1,22 @@
+# Alertmanager: agrupa las alertas de Prometheus y se las manda a Jarvis por un webhook
+# (red interna). Jarvis las avisa por Telegram, si hay bot de demo, y las deja en los logs.
+# Si Jarvis está caído, el aviso no puede salir por él: Alertmanager reintenta y, cuando Jarvis
+# vuelve, llega. En producción convendría un canal que no dependa de Jarvis.
+route:
+  receiver: jarvis
+  group_by: [alertname]
+  group_wait: 10s # espera un poco para juntar alertas que llegan a la vez
+  group_interval: 1m
+  repeat_interval: 4h # si sigue disparada, la repite cada 4 horas
+
+receivers:
+  - name: jarvis
+    webhook_configs:
+      - url: http://jarvis:9464/alertas
+        send_resolved: true
+        max_alerts: 10
+
+# Si Jarvis está caído, las demás alertas son consecuencia: no hace falta avisarlas aparte.
+inhibit_rules:
+  - source_matchers: [alertname="JarvisCaido"]
+    target_matchers: [alertname!="JarvisCaido"]

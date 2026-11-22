@@ -1,0 +1,122 @@
+# Pruebas de las reglas de alerta (series simuladas, sin levantar nada):
+#   docker run --rm -v "<ruta>/monitoreo:/m" --entrypoint promtool prom/prometheus:v3.13.5 test rules /m/alertas.test.yml
+rule_files:
+  - alertas.yml
+
+evaluation_interval: 15s
+
+tests:
+  # Jarvis cae a los 30 s: a 1 min sigue "pendiente"; a los 2 min la alerta ya está disparada.
+  - interval: 15s
+    input_series:
+      - series: 'up{job="jarvis", instance="jarvis:9464"}'
+        values: "1 1 0x10"
+    alert_rule_test:
+      - eval_time: 1m
+        alertname: JarvisCaido
+        exp_alerts: []
+      - eval_time: 2m
+        alertname: JarvisCaido
+        exp_alerts:
+          - exp_labels:
+              severity: critica
+              job: jarvis
+              instance: "jarvis:9464"
+            exp_annotations:
+              resumen: Jarvis no responde hace más de 1 minuto.
+              accion: Docker lo reinicia solo. Si sigue caído, revisa "docker compose logs jarvis".
+
+  # 2 de cada 12 llamadas fallan (16,67 %) durante varios minutos: se dispara.
+  - interval: 15s
+    input_series:
+      - series: 'jarvis_modelo_solicitudes_total{modelo="gemini-3.8-flash", resultado="ok"}'
+        values: "0+10x30"
+      - series: 'jarvis_modelo_solicitudes_total{modelo="gemini-3.8-flash", resultado="error_temporal"}'
+        values: "0+2x30"
+    alert_rule_test:
+      - eval_time: 1m
+        alertname: ErroresDeModelo
+        exp_alerts: []
+      - eval_time: 4m
+        alertname: ErroresDeModelo
+        exp_alerts:
+          - exp_labels:
+              severity: advertencia
+            exp_annotations:
+              resumen: "Fallan más del 5 % de las llamadas a Gemini (16.67%)."
+              accion: Revisa si Gemini está saturado (504). El respaldo debería estar respondiendo; si también falla, revisa la API key y la cuota.
+
+  # Casi sin tráfico (2 llamadas, ambas con error): no es una tendencia, no avisa.
+  - interval: 15s
+    input_series:
+      - series: 'jarvis_modelo_solicitudes_total{modelo="gemini-3.8-flash", resultado="error"}'
+        values: "0 0 1 1 1 2 2 2 2 2 2 2 2 2 2 2 2 2 2 2 2 2 2 2 2"
+    alert_rule_test:
+      - eval_time: 5m
+        alertname: ErroresDeModelo
+        exp_alerts: []
+
+  # 450 MB de 512 MB (87,89 %) por más de 5 minutos: se dispara.
+  - interval: 1m
+    input_series:
+      - series: 'jarvis_process_resident_memory_bytes{job="jarvis", instance="jarvis:9464"}'
+        values: "471859200x10"
+      - series: 'jarvis_memoria_limite_bytes{job="jarvis", instance="jarvis:9464"}'
+        values: "536870912x10"
+    alert_rule_test:
+      - eval_time: 3m
+        alertname: MemoriaAlta
+        exp_alerts: []
+      - eval_time: 7m
+        alertname: MemoriaAlta
+        exp_alerts:
+          - exp_labels:
+              severity: advertencia
+              job: jarvis
+              instance: "jarvis:9464"
+            exp_annotations:
+              resumen: "Jarvis usa el 87.89% de su límite de memoria."
+              accion: Si llega al 100 %, el kernel lo mata (OOM). Sube mem_limit (escalado vertical) o busca qué está consumiendo memoria.
+
+  # Jarvis como servicio: un pago reportado más de 1 hora se avisa; sin lecturas por 3 horas, también.
+  - interval: 1m
+    input_series:
+      - series: 'jarvis_servicio_pagos{origen="produccion", estado="reportado"}'
+        values: "1x90"
+      - series: 'jarvis_servicio_ultima_lectura_timestamp_segundos{origen="produccion"}'
+        values: "0x200"
+    alert_rule_test:
+      - eval_time: 30m
+        alertname: PagosPorConfirmar
+        exp_alerts: []
+      - eval_time: 80m
+        alertname: PagosPorConfirmar
+        exp_alerts:
+          - exp_labels:
+              severity: advertencia
+            exp_annotations:
+              resumen: "Hay 1 pago(s) reportado(s) esperando tu confirmación."
+              accion: Entra al panel, Más → Cobros, y confírmalos o recházalos. Jarvis nunca los confirma solo.
+      - eval_time: 3h15m
+        alertname: ServicioSinMetricas
+        exp_alerts:
+          - exp_labels:
+              severity: advertencia
+            exp_annotations:
+              resumen: Hace más de 3 horas que no llegan los totales de Jarvis como servicio.
+              accion: 'Revisa "docker compose logs metricas-servicio": falta .env.servicio, cambió la contraseña de jarvis_metricas o Neon no responde.'
+
+  # Respaldo: el último bueno fue hace 31 horas (en t=0 la serie vale "hace 31 h"): la alerta se dispara.
+  - interval: 1m
+    input_series:
+      - series: 'jarvis_servicio_respaldo_ultimo_ok_timestamp_segundos{origen="produccion"}'
+        values: "-111600x30"
+    alert_rule_test:
+      - eval_time: 15m
+        alertname: RespaldoAtrasado
+        exp_alerts:
+          - exp_labels:
+              severity: critica
+            exp_annotations:
+              resumen: El último respaldo bueno de Neon tiene más de 30 horas.
+              accion: 'Revisa "docker compose logs respaldo" en la VM (contraseña de jarvis_respaldo, la cuenta de servicio o el bucket) y hazlo a mano con "docker compose exec respaldo /app/respaldar.sh".'

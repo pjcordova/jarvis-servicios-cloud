@@ -1,0 +1,42 @@
+# Generador de carga para mostrar el escalado automático del panel en clase. Empieza APAGADO (0 copias).
+#   Prender:  kubectl -n jarvis scale deployment/carga --replicas=1
+#   Apagar:   kubectl -n jarvis scale deployment/carga --replicas=0
+# Pide la página de inicio del panel (dentro del clúster, por el Service) con 6 pedidos a la vez (la VM tiene 2 CPU: más ahogaría a lo demás). No sale a
+# internet ni toca Neon: la página se arma en el servidor del panel.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: carga
+  namespace: jarvis
+  labels:
+    app: carga
+spec:
+  replicas: 0
+  selector:
+    matchLabels:
+      app: carga
+  template:
+    metadata:
+      labels:
+        app: carga
+    spec:
+      automountServiceAccountToken: false
+      containers:
+        - name: carga
+          image: busybox:1.37
+          command: ["sh", "-c"]
+          args:
+            - |
+              echo "Carga sobre http://panel.jarvis.svc (6 pedidos a la vez)"
+              for i in $(seq 1 6); do
+                # La pausa acota la carga aunque el límite de CPU no se aplicara (pasó en k3s dentro de Docker).
+                ( while true; do wget -q -O /dev/null http://panel.jarvis.svc/ 2>/dev/null; sleep 0.05; done ) &
+              done
+              wait
+          resources:
+            requests:
+              cpu: 50m
+              memory: 16Mi
+            limits:
+              cpu: 200m
+              memory: 64Mi

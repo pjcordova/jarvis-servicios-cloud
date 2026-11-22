@@ -1,0 +1,20 @@
+# Secretos: nunca entran en Git. Se generan con los scripts preparar.mjs de cada servicio.
+.env
+.env.*
+!.env.*.example
+
+# El Jarvis de cada cliente en Prometheus: depende de cada servidor.
+monitoring/clientes/*.json
+
+# Respaldos y llaves
+*.dump
+*.dump.age
+*.pem
+*.key
+llave*.txt
+
+# Ruido
+node_modules/
+*.log
+.DS_Store
+Thumbs.db

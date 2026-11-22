@@ -1,0 +1,49 @@
+# Jarvis en un contenedor (Linux): voz, Telegram, Google Calendar, notas, tareas y recordatorios.
+# El control de la PC y los encargos a Claude Code dependen de Windows y quedan apagados.
+# La bóveda y el estado viven en volúmenes (/boveda y /datos): el contenedor se puede borrar sin perderlos.
+FROM node:24.11.1-bookworm-slim
+
+WORKDIR /app
+ENV NODE_ENV=production
+
+# Primero las dependencias (capa que se reutiliza mientras package-lock.json no cambie).
+COPY package.json package-lock.json ./
+RUN npm ci --omit=dev && npm cache clean --force
+
+COPY src ./src
+COPY public ./public
+# Bóveda de demostración (datos ficticios) y el script que la crea o la reinicia (ver demo/README.md).
+COPY demo/boveda ./demo/boveda
+COPY scripts/crear-boveda-demo.js scripts/demo.js ./scripts/
+# Bóveda propia de cada cliente (Jarvis como servicio): plantilla y el script que la crea.
+COPY clientes/plantillas ./clientes/plantillas
+COPY scripts/crear-boveda-cliente.js ./scripts/
+# Reenvía al agente de la PC del cliente las actualizaciones que el administrador firma en su laptop.
+COPY scripts/enviar-al-agente.js ./scripts/
+
+# Valores para el contenedor; los secretos llegan por env_file (.env.demo), nunca dentro de la imagen.
+ENV JARVIS_HOST=0.0.0.0 \
+    PUERTO=3747 \
+    JARVIS_BOVEDA=/boveda \
+    JARVIS_DATOS=/datos \
+    JARVIS_CONTROL_PC=no \
+    JARVIS_ENCARGOS=no \
+    JARVIS_ARCHIVO_ENV=.env.demo \
+    JARVIS_METRICAS_PUERTO=9464 \
+    JARVIS_METRICAS_HOST=0.0.0.0 \
+    TZ=America/Lima
+
+# Carpetas de los volúmenes, del usuario sin privilegios "node" (los volúmenes nuevos copian este dueño).
+RUN mkdir -p /boveda/logs /boveda/memory /datos && chown -R node:node /boveda /datos
+USER node
+
+# 3747: interfaz de voz. 9464: métricas para Prometheus (solo la red interna de Docker).
+EXPOSE 3747 9464
+# Sano = la API responde. Docker lo marca "unhealthy" si falla 3 veces seguidas.
+HEALTHCHECK --interval=30s --timeout=5s --start-period=20s --retries=3 \
+  CMD node -e "fetch('http://127.0.0.1:' + (process.env.PUERTO || 3747) + '/api/estado').then((r) => process.exit(r.ok ? 0 : 1)).catch(() => process.exit(1))"
+
+# Al arrancar, la bóveda: con JARVIS_USUARIO (el Jarvis de un cliente), la suya; si no, si está vacía,
+# la de demostración. Después arranca Jarvis.
+# --expose-gc: en la demo, la memoria ocupada a propósito se libera apenas se pide (scripts/demo.js).
+CMD ["sh", "-c", "if [ -n \"$JARVIS_USUARIO\" ]; then node scripts/crear-boveda-cliente.js; else node scripts/crear-boveda-demo.js --si-vacia; fi; exec node --expose-gc src/server.js"]
