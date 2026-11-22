@@ -30,6 +30,25 @@ scrape_configs:
     static_configs:
       - targets: ["metricas-servicio:9465"]
 
+  # La máquina: CPU, memoria, disco y red de la VM (node-exporter lee /proc y /sys del host).
+  - job_name: maquina
+    static_configs:
+      - targets: ["node-exporter:9100"]
+
+  # Cada contenedor: cuánta CPU y memoria usa (cAdvisor). Se quedan solo las series que se usan en los
+  # tableros y las alertas: cAdvisor expone cientos por contenedor y Prometheus tiene 256 MB.
+  - job_name: contenedores
+    static_configs:
+      - targets: ["cadvisor:8080"]
+    metric_relabel_configs:
+      - source_labels: [__name__]
+        regex: container_(cpu_usage_seconds_total|memory_working_set_bytes|spec_memory_limit_bytes|network_(receive|transmit)_bytes_total|last_seen)
+        action: keep
+      # Las series sin nombre de contenedor son los totales de la máquina: ya los da node-exporter.
+      - source_labels: [name]
+        regex: ^$
+        action: drop
+
   # El monitoreo también necesita su propia salud: Prometheus y Alertmanager se miden a sí mismos.
   - job_name: prometheus
     static_configs:

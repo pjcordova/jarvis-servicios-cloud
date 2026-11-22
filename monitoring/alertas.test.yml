@@ -120,3 +120,85 @@ tests:
             exp_annotations:
               resumen: El último respaldo bueno de Neon tiene más de 30 horas.
               accion: 'Revisa "docker compose logs respaldo" en la VM (contraseña de jarvis_respaldo, la cuenta de servicio o el bucket) y hazlo a mano con "docker compose exec respaldo /app/respaldar.sh".'
+
+  # La máquina (node-exporter). Las 2 vCPU están al 95 % de uso: en reposo suman 2 s de idle por segundo;
+  # aquí suben solo 0,1 s, o sea 0,05 s por CPU. A los 10 minutos la alerta se dispara.
+  - interval: 15s
+    input_series:
+      - series: 'node_cpu_seconds_total{cpu="0", mode="idle", instance="node-exporter:9100"}'
+        values: "0+0.75x60"
+      - series: 'node_cpu_seconds_total{cpu="1", mode="idle", instance="node-exporter:9100"}'
+        values: "0+0.75x60"
+    alert_rule_test:
+      - eval_time: 5m
+        alertname: CpuAlta
+        exp_alerts: []
+      - eval_time: 11m
+        alertname: CpuAlta
+        exp_alerts:
+          - exp_labels:
+              severity: advertencia
+            exp_annotations:
+              resumen: La VM usa el 95 % de su CPU hace 10 minutos.
+              accion: Mira en Grafana qué contenedor consume (panel CPU por contenedor). Si es sostenido, toca una máquina más grande (escalado vertical).
+
+  # De 4 GB quedan 400 MB disponibles: 90 % usado, por encima del 85 %.
+  - interval: 15s
+    input_series:
+      - series: 'node_memory_MemTotal_bytes{instance="node-exporter:9100"}'
+        values: "4000000000x40"
+      - series: 'node_memory_MemAvailable_bytes{instance="node-exporter:9100"}'
+        values: "400000000x40"
+    alert_rule_test:
+      - eval_time: 6m
+        alertname: MemoriaDeLaMaquinaAlta
+        exp_alerts:
+          - exp_labels:
+              severity: critica
+              instance: "node-exporter:9100"
+            exp_annotations:
+              resumen: La VM usa el 90 % de su memoria.
+              accion: 'Sin swap, el kernel empieza a matar procesos (OOM). Revisa "docker stats" y baja algún mem_limit o apaga un Jarvis de cliente.'
+
+  # Disco de 20 GB con 2 GB libres: 90 % ocupado. A los 15 minutos salta.
+  - interval: 1m
+    input_series:
+      - series: 'node_filesystem_size_bytes{mountpoint="/", fstype="ext4", instance="node-exporter:9100"}'
+        values: "20000000000x30"
+      - series: 'node_filesystem_avail_bytes{mountpoint="/", fstype="ext4", instance="node-exporter:9100"}'
+        values: "2000000000x30"
+    alert_rule_test:
+      - eval_time: 10m
+        alertname: DiscoLleno
+        exp_alerts: []
+      - eval_time: 16m
+        alertname: DiscoLleno
+        exp_alerts:
+          # max() se queda sin etiquetas: la alerta es de la VM, no de un punto de montaje.
+          - exp_labels:
+              severity: advertencia
+            exp_annotations:
+              resumen: El disco de la VM está al 90 % de su capacidad.
+              accion: 'Lo más pesado suele ser Docker: "docker system prune -a" borra imágenes y capas sin usar. Prometheus guarda 15 días de series.'
+
+  # Un contenedor usa 480 MB de su límite de 512 MB (93,75 %): pasa del 90 %.
+  - interval: 15s
+    input_series:
+      - series: 'container_memory_working_set_bytes{name="jarvis-demo", instance="cadvisor:8080"}'
+        values: "503316480x40"
+      - series: 'container_spec_memory_limit_bytes{name="jarvis-demo", instance="cadvisor:8080"}'
+        values: "536870912x40"
+    alert_rule_test:
+      - eval_time: 2m
+        alertname: ContenedorCercaDeSuLimite
+        exp_alerts: []
+      - eval_time: 6m
+        alertname: ContenedorCercaDeSuLimite
+        exp_alerts:
+          - exp_labels:
+              severity: advertencia
+              name: jarvis-demo
+              instance: "cadvisor:8080"
+            exp_annotations:
+              resumen: jarvis-demo usa el 93.75% de su límite de memoria.
+              accion: Al llegar al 100 % el kernel lo mata y Docker lo reinicia. Sube su mem_limit en docker-compose.yml o revisa qué consume.

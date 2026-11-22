@@ -55,6 +55,8 @@ services:
       - jarvis
       - alertmanager
       - metricas-servicio
+      - node-exporter
+      - cadvisor
 
   alertmanager:
     image: prom/alertmanager:v0.34.1
@@ -68,6 +70,55 @@ services:
     ports:
       - "127.0.0.1:9093:9093" # para ver las alertas en el navegador
     mem_limit: 128m
+    restart: unless-stopped
+
+  # Métricas de la máquina: CPU, memoria, disco y red de la VM. Lee /proc y /sys del host en solo lectura;
+  # no necesita privilegios. Con --path.rootfs=/host, los puntos de montaje salen con su ruta real (/, /boot…).
+  node-exporter:
+    image: prom/node-exporter:v1.13.1
+    container_name: jarvis-node-exporter
+    command:
+      - --path.rootfs=/host
+      # Sin los sistemas de archivos de los propios contenedores: solo interesa el disco de la VM.
+      - --collector.filesystem.mount-points-exclude=^/host/(dev|proc|sys|var/lib/docker/.+|run/docker/.+)($$|/)
+      - --collector.filesystem.fs-types-exclude=^(autofs|binfmt_misc|cgroup.?|configfs|debugfs|devpts|devtmpfs|fusectl|hugetlbfs|mqueue|overlay|proc|procfs|pstore|rpc_pipefs|securityfs|selinuxfs|squashfs|sysfs|tracefs)$$
+    pid: host # para ver los procesos de la VM, no solo los del contenedor
+    volumes:
+      # Todo el disco de la VM, solo lectura. Sin "rslave" a propósito: Docker Desktop en Windows no lo acepta
+      # ("path / is mounted on / but it is not a shared or slave mount") y así el mismo archivo sirve para probar
+      # en la laptop y para la VM. Se pierde ver los montajes creados después de arrancar, que aquí no cambian.
+      - /:/host:ro
+    expose:
+      - "9100" # solo la red interna (Prometheus); no se publica
+    mem_limit: 64m
+    memswap_limit: 64m
+    cpus: 0.2
+    restart: unless-stopped
+
+  # Métricas por contenedor: cuánta CPU y memoria usa cada Jarvis. Así se ve qué cliente consume más
+  # y si alguno se acerca a su mem_limit antes de que el kernel lo mate.
+  cadvisor:
+    image: gcr.io/cadvisor/cadvisor:v0.55.1
+    container_name: jarvis-cadvisor
+    command:
+      - --docker_only=true # sin los cgroups del sistema: solo contenedores
+      - --housekeeping_interval=15s # igual que el scrape_interval de Prometheus
+      - --store_container_labels=false # menos series: las etiquetas de Docker no se guardan
+      # cAdvisor mide decenas de cosas por contenedor; en una VM de 4 GB eso pesa. Se apaga lo que no se usa:
+      # "percpu" solo era desglose por núcleo (88 series para 6 contenedores), y el resto no sale en ningún panel.
+      - --disable_metrics=percpu,sched,process,hugetlb,referenced_memory,resctrl,tcp,udp,advtcp,diskIO,disk,cpuLoad,oom_event,memory_numa,cpu_topology
+    volumes:
+      - /:/rootfs:ro
+      - /var/run:/var/run:ro
+      - /sys:/sys:ro
+      - /var/lib/docker/:/var/lib/docker:ro
+    devices:
+      - /dev/kmsg:/dev/kmsg:r # el registro del kernel; evita tener que correrlo en modo privilegiado
+    expose:
+      - "8080" # solo la red interna (Prometheus); no se publica
+    mem_limit: 256m
+    memswap_limit: 256m
+    cpus: 0.5
     restart: unless-stopped
 
   # Jarvis como servicio (panel en Vercel + Neon): lee sus totales de Neon una vez por hora y los deja para Prometheus.
