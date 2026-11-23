@@ -42,7 +42,7 @@ scrape_configs:
       - targets: ["cadvisor:8080"]
     metric_relabel_configs:
       - source_labels: [__name__]
-        regex: container_(cpu_usage_seconds_total|memory_working_set_bytes|spec_memory_limit_bytes|network_(receive|transmit)_bytes_total|last_seen)
+        regex: container_(cpu_usage_seconds_total|memory_working_set_bytes|spec_memory_limit_bytes|network_(receive|transmit)_bytes_total|start_time_seconds|last_seen)
         action: keep
       # Las series sin nombre de contenedor son los totales de la máquina: ya los da node-exporter.
       - source_labels: [name]

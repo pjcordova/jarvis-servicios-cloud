@@ -48,9 +48,10 @@ groups:
 
   # La máquina y los contenedores (node-exporter y cAdvisor). La VM es e2-medium: 2 vCPU, 4 GB y sin swap,
   # así que quedarse sin memoria no se amortigua: el kernel mata el proceso que más usa.
-  - name: maquina
+  # Los nombres, umbrales y duraciones son los de la Tabla 26 del informe del curso.
+  - name: infraestructura
     rules:
-      - alert: CpuAlta
+      - alert: VMCPUAlta
         expr: 100 * (1 - avg(rate(node_cpu_seconds_total{mode="idle"}[5m]))) > 85
         for: 10m
         labels:
@@ -59,30 +60,41 @@ groups:
           resumen: "La VM usa el {{ $value | printf \"%.0f\" }} % de su CPU hace 10 minutos."
           accion: Mira en Grafana qué contenedor consume (panel CPU por contenedor). Si es sostenido, toca una máquina más grande (escalado vertical).
 
-      - alert: MemoriaDeLaMaquinaAlta
-        expr: 100 * (1 - node_memory_MemAvailable_bytes / node_memory_MemTotal_bytes) > 85
+      # Se mide la memoria DISPONIBLE, no la usada: lo que importa sin swap es cuánto queda antes del OOM.
+      - alert: VMMemoriaDisponibleBaja
+        expr: 100 * (node_memory_MemAvailable_bytes / node_memory_MemTotal_bytes) < 15
         for: 5m
         labels:
           severity: critica
         annotations:
-          resumen: "La VM usa el {{ $value | printf \"%.0f\" }} % de su memoria."
+          resumen: "A la VM le queda el {{ $value | printf \"%.0f\" }} % de memoria disponible."
           accion: 'Sin swap, el kernel empieza a matar procesos (OOM). Revisa "docker stats" y baja algún mem_limit o apaga un Jarvis de cliente.'
 
-      # Por el disco más lleno de la VM, no por un punto de montaje fijo: con --path.rootfs el nombre cambia
-      # según el sistema (en la VM es "/", en Docker Desktop son rutas de WSL). Solo discos de verdad.
-      - alert: DiscoLleno
-        expr: 100 * max(1 - node_filesystem_avail_bytes{fstype=~"ext4|xfs|btrfs"} / node_filesystem_size_bytes{fstype=~"ext4|xfs|btrfs"}) > 85
-        for: 15m
+      # Por el disco con menos espacio libre, no por un punto de montaje fijo: con --path.rootfs el nombre
+      # cambia según el sistema (en la VM es "/", en Docker Desktop son rutas de WSL). Solo discos de verdad.
+      - alert: VMDiscoLleno
+        expr: 100 * min(node_filesystem_avail_bytes{fstype=~"ext4|xfs|btrfs"} / node_filesystem_size_bytes{fstype=~"ext4|xfs|btrfs"}) < 15
+        for: 10m
         labels:
           severity: advertencia
         annotations:
-          resumen: "El disco de la VM está al {{ $value | printf \"%.0f\" }} % de su capacidad."
+          resumen: "Al disco de la VM le queda el {{ $value | printf \"%.0f\" }} % libre."
           accion: 'Lo más pesado suele ser Docker: "docker system prune -a" borra imágenes y capas sin usar. Prometheus guarda 15 días de series.'
 
-      - alert: ContenedorCercaDeSuLimite
+      # El punto ciego del monitoreo: si quien mide deja de responder, deja de haber alertas de la máquina.
+      - alert: ExportadorCaido
+        expr: up{job=~"maquina|contenedores"} == 0
+        for: 2m
+        labels:
+          severity: advertencia
+        annotations:
+          resumen: "El exportador de {{ $labels.job }} no responde hace más de 2 minutos."
+          accion: 'Sin él no hay métricas de la VM ni de los contenedores. Revisa "docker compose logs node-exporter cadvisor"; Docker los reinicia solo.'
+
+      - alert: ContenedorMemoriaAlta
         expr: |
           container_memory_working_set_bytes{name!=""}
-          / container_spec_memory_limit_bytes{name!=""} > 0.9
+          / container_spec_memory_limit_bytes{name!=""} > 0.8
           and container_spec_memory_limit_bytes{name!=""} > 0
         for: 5m
         labels:
@@ -90,6 +102,16 @@ groups:
         annotations:
           resumen: "{{ $labels.name }} usa el {{ $value | humanizePercentage }} de su límite de memoria."
           accion: Al llegar al 100 % el kernel lo mata y Docker lo reinicia. Sube su mem_limit en docker-compose.yml o revisa qué consume.
+
+      # Reiniciarse una vez es normal; hacerlo tres veces en 15 minutos es un bucle (OOM o un error al arrancar).
+      # Sin "for": se avisa de inmediato, porque cada reinicio es un corte de servicio.
+      - alert: ContenedorReiniciandose
+        expr: changes(container_start_time_seconds{name!=""}[15m]) > 2
+        labels:
+          severity: advertencia
+        annotations:
+          resumen: "{{ $labels.name }} se reinició {{ $value }} veces en 15 minutos."
+          accion: 'Suele ser el kernel matándolo por memoria (OOM) o un error al arrancar. Mira "docker compose logs --tail 50 <servicio>" y su mem_limit.'
 
   # Jarvis como servicio (panel en Vercel + Neon): lo lee el colector de servicio-metricas una vez por hora.
   - name: servicio

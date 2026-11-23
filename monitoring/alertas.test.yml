@@ -131,10 +131,10 @@ tests:
         values: "0+0.75x60"
     alert_rule_test:
       - eval_time: 5m
-        alertname: CpuAlta
+        alertname: VMCPUAlta
         exp_alerts: []
       - eval_time: 11m
-        alertname: CpuAlta
+        alertname: VMCPUAlta
         exp_alerts:
           - exp_labels:
               severity: advertencia
@@ -142,7 +142,7 @@ tests:
               resumen: La VM usa el 95 % de su CPU hace 10 minutos.
               accion: Mira en Grafana qué contenedor consume (panel CPU por contenedor). Si es sostenido, toca una máquina más grande (escalado vertical).
 
-  # De 4 GB quedan 400 MB disponibles: 90 % usado, por encima del 85 %.
+  # De 4 GB quedan 400 MB disponibles: 10 %, por debajo del 15 % que exige la alerta.
   - interval: 15s
     input_series:
       - series: 'node_memory_MemTotal_bytes{instance="node-exporter:9100"}'
@@ -151,16 +151,16 @@ tests:
         values: "400000000x40"
     alert_rule_test:
       - eval_time: 6m
-        alertname: MemoriaDeLaMaquinaAlta
+        alertname: VMMemoriaDisponibleBaja
         exp_alerts:
           - exp_labels:
               severity: critica
               instance: "node-exporter:9100"
             exp_annotations:
-              resumen: La VM usa el 90 % de su memoria.
+              resumen: A la VM le queda el 10 % de memoria disponible.
               accion: 'Sin swap, el kernel empieza a matar procesos (OOM). Revisa "docker stats" y baja algún mem_limit o apaga un Jarvis de cliente.'
 
-  # Disco de 20 GB con 2 GB libres: 90 % ocupado. A los 15 minutos salta.
+  # Disco de 20 GB con 2 GB libres: 10 % libre, por debajo del 15 %. A los 10 minutos salta.
   - interval: 1m
     input_series:
       - series: 'node_filesystem_size_bytes{mountpoint="/", fstype="ext4", instance="node-exporter:9100"}'
@@ -168,37 +168,80 @@ tests:
       - series: 'node_filesystem_avail_bytes{mountpoint="/", fstype="ext4", instance="node-exporter:9100"}'
         values: "2000000000x30"
     alert_rule_test:
-      - eval_time: 10m
-        alertname: DiscoLleno
+      - eval_time: 5m
+        alertname: VMDiscoLleno
         exp_alerts: []
-      - eval_time: 16m
-        alertname: DiscoLleno
+      - eval_time: 11m
+        alertname: VMDiscoLleno
         exp_alerts:
-          # max() se queda sin etiquetas: la alerta es de la VM, no de un punto de montaje.
+          # min() se queda sin etiquetas: la alerta es de la VM, no de un punto de montaje.
           - exp_labels:
               severity: advertencia
             exp_annotations:
-              resumen: El disco de la VM está al 90 % de su capacidad.
+              resumen: Al disco de la VM le queda el 10 % libre.
               accion: 'Lo más pesado suele ser Docker: "docker system prune -a" borra imágenes y capas sin usar. Prometheus guarda 15 días de series.'
 
-  # Un contenedor usa 480 MB de su límite de 512 MB (93,75 %): pasa del 90 %.
+  # cAdvisor deja de responder a los 30 s: a los 2 minutos se avisa, porque sin él no hay métricas.
+  - interval: 30s
+    input_series:
+      - series: 'up{job="contenedores", instance="cadvisor:8080"}'
+        values: "1 0x10"
+      - series: 'up{job="maquina", instance="node-exporter:9100"}'
+        values: "1x10"
+    alert_rule_test:
+      - eval_time: 1m
+        alertname: ExportadorCaido
+        exp_alerts: []
+      - eval_time: 3m
+        alertname: ExportadorCaido
+        exp_alerts:
+          - exp_labels:
+              severity: advertencia
+              job: contenedores
+              instance: "cadvisor:8080"
+            exp_annotations:
+              resumen: El exportador de contenedores no responde hace más de 2 minutos.
+              accion: 'Sin él no hay métricas de la VM ni de los contenedores. Revisa "docker compose logs node-exporter cadvisor"; Docker los reinicia solo.'
+
+  # Un contenedor usa 440 MB de su límite de 512 MB (85,94 %): pasa del 80 %.
   - interval: 15s
     input_series:
       - series: 'container_memory_working_set_bytes{name="jarvis-demo", instance="cadvisor:8080"}'
-        values: "503316480x40"
+        values: "461373440x40"
       - series: 'container_spec_memory_limit_bytes{name="jarvis-demo", instance="cadvisor:8080"}'
         values: "536870912x40"
     alert_rule_test:
       - eval_time: 2m
-        alertname: ContenedorCercaDeSuLimite
+        alertname: ContenedorMemoriaAlta
         exp_alerts: []
       - eval_time: 6m
-        alertname: ContenedorCercaDeSuLimite
+        alertname: ContenedorMemoriaAlta
         exp_alerts:
           - exp_labels:
               severity: advertencia
               name: jarvis-demo
               instance: "cadvisor:8080"
             exp_annotations:
-              resumen: jarvis-demo usa el 93.75% de su límite de memoria.
+              resumen: jarvis-demo usa el 85.94% de su límite de memoria.
               accion: Al llegar al 100 % el kernel lo mata y Docker lo reinicia. Sube su mem_limit en docker-compose.yml o revisa qué consume.
+
+  # Un contenedor en bucle: arranca 4 veces en 15 minutos (3 reinicios). Sin "for": se avisa de inmediato.
+  - interval: 1m
+    input_series:
+      # Cada escalón es un arranque nuevo (el valor es cuándo arrancó, en segundos).
+      - series: 'container_start_time_seconds{name="jarvis-demo", instance="cadvisor:8080"}'
+        values: "100x3 400x3 700x3 1000x8"
+    alert_rule_test:
+      - eval_time: 2m
+        alertname: ContenedorReiniciandose
+        exp_alerts: []
+      - eval_time: 12m
+        alertname: ContenedorReiniciandose
+        exp_alerts:
+          - exp_labels:
+              severity: advertencia
+              name: jarvis-demo
+              instance: "cadvisor:8080"
+            exp_annotations:
+              resumen: jarvis-demo se reinició 3 veces en 15 minutos.
+              accion: 'Suele ser el kernel matándolo por memoria (OOM) o un error al arrancar. Mira "docker compose logs --tail 50 <servicio>" y su mem_limit.'
